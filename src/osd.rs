@@ -14,7 +14,20 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const HOLD: f64 = 2.0; // seconds on screen before leaving
+const HOLD: f64 = 2.0; // default seconds on screen before leaving
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Icon {
+    Headphones,
+    Speaker,
+    Keyboard,
+}
+
+impl Icon {
+    pub fn for_device(headphones: bool) -> Icon {
+        if headphones { Icon::Headphones } else { Icon::Speaker }
+    }
+}
 
 thread_local! {
     static CURRENT: RefCell<Option<Osd>> = const { RefCell::new(None) };
@@ -26,10 +39,15 @@ pub fn quit_when_done() {
 }
 
 /// Show the island (replaces one that is still on screen).
-pub fn show(caption: &str, title: &str, headphones: bool) {
+pub fn show(caption: &str, title: &str, icon: Icon) {
+    show_for(caption, title, icon, HOLD);
+}
+
+/// Same, staying on screen for `hold` seconds.
+pub fn show_for(caption: &str, title: &str, icon: Icon, hold: f64) {
     let old = CURRENT.with(|c| c.borrow_mut().take());
     drop(old);
-    if let Some(osd) = Osd::new(caption, title, headphones) {
+    if let Some(osd) = Osd::new(caption, title, icon, hold) {
         CURRENT.with(|c| *c.borrow_mut() = Some(osd));
     }
 }
@@ -316,10 +334,11 @@ struct Osd {
     velocity: f64,
     alpha: f64,
     leaving: Option<Instant>,
+    hold: f64,
 }
 
 impl Osd {
-    fn new(caption: &str, title: &str, headphones: bool) -> Option<Osd> {
+    fn new(caption: &str, title: &str, icon: Icon, hold: f64) -> Option<Osd> {
         let s = unsafe { GetDpiForSystem() } as f32 / 96.0;
         let theme = Theme::system();
         let fonts = Fonts::load()?;
@@ -387,7 +406,7 @@ impl Osd {
         let circle = PathBuilder::from_circle(cx, cy, r)?;
         base.fill_path(&circle, &badge, FillRule::Winding, Transform::identity(), None);
 
-        draw_icon(&mut base, cx, cy, s, headphones);
+        draw_icon(&mut base, cx, cy, s, icon);
 
         // texts
         let tx = cx + r + 12.0 * s;
@@ -419,7 +438,7 @@ impl Osd {
         let now = Instant::now();
         let mut osd = Osd {
             hwnd, memdc, dib, old_obj, bits, base, frame, pill_mask, pill, theme, s, w, h, base_x, base_y,
-            start: now, last: now, offset: 26.0, velocity: 0.0, alpha: 0.0, leaving: None,
+            start: now, last: now, offset: 26.0, velocity: 0.0, alpha: 0.0, leaving: None, hold,
         };
         osd.render();
         unsafe {
@@ -448,7 +467,7 @@ impl Osd {
                     t -= h;
                 }
                 self.alpha = (life / 0.16).min(1.0);
-                if life >= HOLD {
+                if life >= self.hold {
                     self.leaving = Some(now);
                 }
             }
@@ -595,13 +614,28 @@ unsafe fn create_window(x: i32, y: i32, w: u32, h: u32) -> Option<(HWND, HDC, HB
 }
 
 /// Outline icons with round caps, white on the badge.
-fn draw_icon(pm: &mut Pixmap, cx: f32, cy: f32, s: f32, headphones: bool) {
+fn draw_icon(pm: &mut Pixmap, cx: f32, cy: f32, s: f32, icon: Icon) {
     let mut paint = Paint::default();
     paint.anti_alias = true;
     paint.set_color(Color::WHITE);
     let stroke = Stroke { width: 1.8 * s, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
     let mut pb = PathBuilder::new();
-    if headphones {
+    if icon == Icon::Keyboard {
+        let (w, h) = (17.0 * s, 12.0 * s);
+        let body = rounded_rect(cx - w / 2.0, cy - h / 2.0, w, h, 2.6 * s);
+        pm.stroke_path(&body, &paint, &stroke, Transform::identity(), None);
+        // two rows of keys as dots, then the space bar
+        for (row, n) in [(-2.6f32, 4), (0.4, 4)] {
+            for i in 0..n {
+                let x = cx - 4.8 * s + i as f32 * 3.2 * s;
+                if let Some(dot) = PathBuilder::from_circle(x, cy + row * s, 0.95 * s) {
+                    pm.fill_path(&dot, &paint, FillRule::Winding, Transform::identity(), None);
+                }
+            }
+        }
+        pb.move_to(cx - 3.2 * s, cy + 3.3 * s);
+        pb.line_to(cx + 3.2 * s, cy + 3.3 * s);
+    } else if icon == Icon::Headphones {
         let r = 7.5 * s;
         let top = cy + 0.5 * s;
         // headband: from the left side over the top to the right side
